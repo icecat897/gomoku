@@ -4,14 +4,24 @@ import { getWsUrl } from '../api';
 
 export type ConnectionStatus = 'connecting' | 'open' | 'closed' | 'error';
 
+export interface CloseInfo {
+  code: number;
+  reason: string;
+  wasClean: boolean;
+}
+
 export interface UseGameSocket {
   status: ConnectionStatus;
   state: GameState | null;
   me: { color: Color | null; isSpectator: boolean };
   lastError: string | null;
   toast: string | null;
+  wsUrl: string;
+  attempts: number;
+  closeInfo: CloseInfo | null;
   send: (msg: ClientMsg) => void;
   clearToast: () => void;
+  reconnect: () => void;
 }
 
 export function useGameSocket(
@@ -27,6 +37,11 @@ export function useGameSocket(
   });
   const [lastError, setLastError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [attempts, setAttempts] = useState(0);
+  const [closeInfo, setCloseInfo] = useState<CloseInfo | null>(null);
+  const [reconnectKey, setReconnectKey] = useState(0);
+
+  const wsUrl = getWsUrl(roomCode);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<number | null>(null);
@@ -44,18 +59,23 @@ export function useGameSocket(
   const connect = useCallback(() => {
     if (closedByUser.current) return;
     setStatus('connecting');
+    setAttempts((n) => n + 1);
+    console.log('[GameSocket] connecting to', wsUrl);
     let ws: WebSocket;
     try {
-      ws = new WebSocket(getWsUrl(roomCode));
+      ws = new WebSocket(wsUrl);
     } catch (e) {
+      console.error('[GameSocket] WS construction failed:', e);
       setStatus('error');
-      setLastError((e as Error).message);
+      setLastError(`WebSocket 创建失败: ${(e as Error).message}`);
       return;
     }
     wsRef.current = ws;
 
     ws.onopen = () => {
+      console.log('[GameSocket] open');
       setStatus('open');
+      setCloseInfo(null);
       ws.send(
         JSON.stringify({
           type: 'join',
@@ -75,16 +95,19 @@ export function useGameSocket(
       handleServerMsg(msg);
     };
 
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
+      console.warn('[GameSocket] close', ev.code, ev.reason, 'clean=', ev.wasClean);
       setStatus('closed');
+      setCloseInfo({ code: ev.code, reason: ev.reason, wasClean: ev.wasClean });
       if (closedByUser.current) return;
-      reconnectTimer.current = window.setTimeout(connect, 1500);
+      reconnectTimer.current = window.setTimeout(connect, 2000);
     };
 
-    ws.onerror = () => {
+    ws.onerror = (e) => {
+      console.error('[GameSocket] error', e);
       setStatus('error');
     };
-  }, [roomCode]);
+  }, [wsUrl]);
 
   const handleServerMsg = useCallback((msg: ServerMsg) => {
     switch (msg.type) {
@@ -162,13 +185,14 @@ export function useGameSocket(
 
   useEffect(() => {
     closedByUser.current = false;
+    setAttempts(0);
     connect();
     return () => {
       closedByUser.current = true;
       if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current);
       wsRef.current?.close();
     };
-  }, [connect]);
+  }, [connect, reconnectKey]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -187,5 +211,23 @@ export function useGameSocket(
 
   const clearToast = useCallback(() => setToast(null), []);
 
-  return { status, state, me, lastError, toast, send, clearToast };
+  const reconnect = useCallback(() => {
+    if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current);
+    wsRef.current?.close();
+    setReconnectKey((k) => k + 1);
+  }, []);
+
+  return {
+    status,
+    state,
+    me,
+    lastError,
+    toast,
+    wsUrl,
+    attempts,
+    closeInfo,
+    send,
+    clearToast,
+    reconnect,
+  };
 }
